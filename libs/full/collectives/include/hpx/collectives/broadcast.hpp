@@ -233,7 +233,20 @@ namespace hpx { namespace traits {
                 // step function (invoked for each get)
                 nullptr,
                 // finalizer (invoked after all sites have checked in)
-                [](auto& data, bool&) { return data[0]; }, 1);
+                [](auto& data, bool&) {
+                    // protect against vector<bool> idiosyncrasies
+                    using value_type = typename std::remove_reference_t<
+                        decltype(data)>::value_type;
+                    if constexpr (std::is_same_v<value_type, bool>)
+                    {
+                        return bool(data[0]);
+                    }
+                    else
+                    {
+                        return data[0];
+                    }
+                },
+                1);
         }
 
         template <typename Result, typename T>

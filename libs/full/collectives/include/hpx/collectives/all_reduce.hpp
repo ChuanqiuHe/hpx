@@ -164,7 +164,18 @@ namespace hpx { namespace traits {
                             data[0], HPX_FORWARD(F, op));
                         data_available = true;
                     }
-                    return data[0];
+
+                    // protect against vector<bool> idiosyncrasies
+                    using value_type = typename std::remove_reference_t<
+                        decltype(data)>::value_type;
+                    if constexpr (std::is_same_v<value_type, bool>)
+                    {
+                        return bool(data[0]);
+                    }
+                    else
+                    {
+                        return data[0];
+                    }
                 });
         }
     };

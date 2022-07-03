@@ -254,7 +254,19 @@ namespace hpx { namespace traits {
                 // step function (invoked once for set)
                 [&](auto& data) { data = HPX_MOVE(t); },
                 // finalizer (invoked after all sites have checked in)
-                [which](auto& data, bool&) { return HPX_MOVE(data[which]); });
+                [which](auto& data, bool&) {
+                    // protect against vector<bool> idiosyncrasies
+                    using value_type = typename std::remove_reference_t<
+                        decltype(data)>::value_type;
+                    if constexpr (std::is_same_v<value_type, bool>)
+                    {
+                        return bool(data[which]);
+                    }
+                    else
+                    {
+                        return HPX_MOVE(data[which]);
+                    }
+                });
         }
     };
 }}    // namespace hpx::traits

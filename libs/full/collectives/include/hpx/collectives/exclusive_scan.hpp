@@ -180,7 +180,18 @@ namespace hpx { namespace traits {
                         std::swap(data, dest);
                         data_available = true;
                     }
-                    return data[which];
+
+                    // protect against vector<bool> idiosyncrasies
+                    using value_type = typename std::remove_reference_t<
+                        decltype(data)>::value_type;
+                    if constexpr (std::is_same_v<value_type, bool>)
+                    {
+                        return bool(data[which]);
+                    }
+                    else
+                    {
+                        return data[which];
+                    }
                 });
         }
     };
