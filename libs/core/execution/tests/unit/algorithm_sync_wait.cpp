@@ -46,6 +46,10 @@ int hpx_main()
     }
 
     {
+        HPX_TEST_EQ(tt::sync_wait(ex::just(4, 5)), 3);
+    }
+
+    {
         HPX_TEST_EQ(
             tt::sync_wait(ex::just(custom_type_non_default_constructible{42}))
                 .x,
@@ -76,6 +80,10 @@ int hpx_main()
 
     {
         HPX_TEST_EQ(ex::just(3) | tt::sync_wait(), 3);
+    }
+
+    {
+        HPX_TEST_EQ(ex::just(4, 5) | tt::sync_wait(), 3);
     }
 
     // tag_invoke overload
