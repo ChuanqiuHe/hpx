@@ -1,4 +1,4 @@
-//  Copyright (c) 2020 ETH Zurich
+//  Copyright (c) 2020 ETH Zurich 
 //  Copyright (c) 2022 Hartmut Kaiser
 //
 //  SPDX-License-Identifier: BSL-1.0
@@ -22,7 +22,7 @@
 #include <hpx/synchronization/spinlock.hpp>
 #include <hpx/type_support/meta.hpp>
 #include <hpx/type_support/pack.hpp>
-#include <hpx/type_support/unused.hpp>
+#include <hpx/type_support/unused.hpp
 
 #include <atomic>
 #include <exception>
@@ -57,8 +57,11 @@ namespace hpx::execution::experimental::detail {
 
     template <typename Pack>
     using make_decayed_pack_t = typename make_decayed_pack<Pack>::type;
-
-    template <typename Sender>
+    
+    // integrate sync_wait and sync_wait_with_variant
+    enum class Sync_wait_type { single=0, variant=1};
+    
+    template <typename Sender, Sync_wait_type Type >
     struct sync_wait_receiver
     {
         // value and error_types of the predecessor sender
@@ -70,6 +73,7 @@ namespace hpx::execution::experimental::detail {
         template <template <typename...> class Variant>
         using predecessor_error_types =
             error_types_of_t<Sender, empty_env, Variant>;
+        
 
         // forcing static_assert ensuring variant has exactly one tuple
         //
@@ -78,13 +82,13 @@ namespace hpx::execution::experimental::detail {
         // value_types for a sender. In particular, split() explicitly adds a
         // const& to all tuple members in a way that prevent simply passing
         // decayed_tuple to predecessor_value_types.
-        using single_result_type = make_decayed_pack_t<
-            single_variant_t<predecessor_value_types<hpx::tuple, meta::pack>>>;
+         using single_result_type = make_decayed_pack_t<
+             single_variant_t<predecessor_value_types<hpx::tuple, meta::pack>>>;
 
         // The template should compute the result type of whatever returned from
-        // sync_wait, which should be optional of the variant of the tuples. The
-        // sync_wait works when the variant has one tuple.
-        using result_type = hpx::variant<single_result_type>;
+        // sync_wait or sync_wait_with_variant by checking Sync_wait_type is single or variant
+
+        using result_type = std::conditional<Type == Sync_wait_type::single, hpx::variant<single_result_type>, predecessor_value_types<hpx::tuple, hpx::variant>>;
 
         // The type of errors to store in the variant. This in itself is a
         // variant.
@@ -118,14 +122,16 @@ namespace hpx::execution::experimental::detail {
 
             auto get_value()
             {
-                if (hpx::holds_alternative<result_type>(value))
-                {
-                    // pull the tuple out of the variant and wrap it into an
-                    // optional, make sure to remove the references
+                if constexpr(Type == Sync_wait_type::single){
                     return hpx::optional<single_result_type>(
                         hpx::get<0>(hpx::get<result_type>(HPX_MOVE(value))));
+        
+                }else{
+                    return hpx::optional(
+                        hpx::get<result_type>(HPX_MOVE(value)));
                 }
-                else if (hpx::holds_alternative<error_type>(value))
+                
+                if (hpx::holds_alternative<error_type>(value))
                 {
                     hpx::visit(
                         sync_wait_error_visitor{}, hpx::get<error_type>(value));
