@@ -8,22 +8,18 @@
 #pragma once
 
 #include <hpx/config.hpp>
-#include <hpx/assert.hpp>
 #include <hpx/concepts/concepts.hpp>
 #include <hpx/datastructures/optional.hpp>
 #include <hpx/datastructures/tuple.hpp>
 #include <hpx/datastructures/variant.hpp>
-#include <hpx/execution/algorithms/detail/inject_scheduler.hpp>
 #include <hpx/execution/algorithms/detail/partial_algorithm.hpp>
 #include <hpx/execution/algorithms/detail/single_result.hpp>
-#include <hpx/execution/algorithms/run_loop.hpp>
-#include <hpx/execution/queries/get_delegatee_scheduler.hpp>
-#include <hpx/execution/queries/get_scheduler.hpp>
 #include <hpx/execution_base/completion_signatures.hpp>
 #include <hpx/execution_base/operation_state.hpp>
-#include <hpx/execution_base/receiver.hpp>
 #include <hpx/execution_base/sender.hpp>
 #include <hpx/functional/detail/tag_priority_invoke.hpp>
+#include <hpx/synchronization/condition_variable.hpp>
+#include <hpx/synchronization/spinlock.hpp>
 #include <hpx/type_support/meta.hpp>
 #include <hpx/type_support/pack.hpp>
 #include <hpx/type_support/unused.hpp>
@@ -31,9 +27,14 @@
 #include <atomic>
 #include <exception>
 #include <mutex>
-#include <system_error>
 #include <type_traits>
 #include <utility>
+
+enum class Sync_wait_type
+    {
+        single,
+        variant
+    };
 
 namespace hpx::execution::experimental::detail {
 
@@ -41,34 +42,13 @@ namespace hpx::execution::experimental::detail {
     {
         void operator()(std::exception_ptr ep) const
         {
-            std::rethrow_exception(HPX_MOVE(ep));
+            std::rethrow_exception(ep);
         }
 
         template <typename Error>
         void operator()(Error& error) const
         {
             throw error;
-        }
-    };
-
-    struct sync_wait_receiver_env
-    {
-        using scheduler_type =
-            decltype(std::declval<run_loop>().get_scheduler());
-
-        scheduler_type sched;
-
-        friend auto tag_invoke(hpx::execution::experimental::get_scheduler_t,
-            sync_wait_receiver_env const& env) noexcept -> scheduler_type
-        {
-            return env.sched;
-        }
-
-        friend auto tag_invoke(
-            hpx::execution::experimental::get_delegatee_scheduler_t,
-            sync_wait_receiver_env const& env) noexcept -> scheduler_type
-        {
-            return env.sched;
         }
     };
 
@@ -84,18 +64,25 @@ namespace hpx::execution::experimental::detail {
     template <typename Pack>
     using make_decayed_pack_t = typename make_decayed_pack<Pack>::type;
 
-    template <typename Sender>
+    // integrate sync_wait and sync_wait_with_variant
+    //enum class Sync_wait_type
+    //{
+    //    single,
+    //    variant
+    //};
+    // Sync_wait_type Type;
+    template <typename Sender, Sync_wait_type Type>
     struct sync_wait_receiver
     {
         // value and error_types of the predecessor sender
         template <template <typename...> class Tuple,
             template <typename...> class Variant>
         using predecessor_value_types =
-            value_types_of_t<Sender, sync_wait_receiver_env, Tuple, Variant>;
+            value_types_of_t<Sender, empty_env, Tuple, Variant>;
 
         template <template <typename...> class Variant>
         using predecessor_error_types =
-            error_types_of_t<Sender, sync_wait_receiver_env, Variant>;
+            error_types_of_t<Sender, empty_env, Variant>;
 
         // forcing static_assert ensuring variant has exactly one tuple
         //
@@ -108,9 +95,11 @@ namespace hpx::execution::experimental::detail {
             single_variant_t<predecessor_value_types<hpx::tuple, meta::pack>>>;
 
         // The template should compute the result type of whatever returned from
-        // sync_wait, which should be optional of the variant of the tuples. The
-        // sync_wait works when the variant has one tuple.
-        using result_type = hpx::variant<single_result_type>;
+        // sync_wait or sync_wait_with_variant by checking Sync_wait_type is single or variant
+        using result_type =
+            std::conditional<Type == Sync_wait_type::single,
+                hpx::variant<single_result_type>,
+                predecessor_value_types<hpx::tuple, hpx::variant>>;
 
         // The type of errors to store in the variant. This in itself is a
         // variant.
@@ -118,91 +107,95 @@ namespace hpx::execution::experimental::detail {
             hpx::util::detail::unique_t<hpx::util::detail::prepend_t<
                 predecessor_error_types<hpx::variant>, std::exception_ptr>>;
 
-        using stopped_type = hpx::execution::experimental::set_stopped_t;
+        // We use a spinlock here to allow taking the lock on non-HPX threads.
+        using mutex_type = hpx::spinlock;
 
         struct shared_state
         {
-            hpx::variant<hpx::monostate, error_type, result_type, stopped_type>
-                value;
+            // We use a spinlock here to allow taking the lock on non-HPX
+            // threads.
+            hpx::condition_variable cond_var;
+            mutex_type mtx;
+            std::atomic<bool> set_called = false;
+            hpx::variant<hpx::monostate, error_type, result_type> value;
+
+            void wait()
+            {
+                if (!set_called)
+                {
+                    std::unique_lock<mutex_type> l(mtx);
+                    if (!set_called)
+                    {
+                        cond_var.wait(l);
+                    }
+                }
+            }
 
             auto get_value()
             {
-                if (hpx::holds_alternative<result_type>(value))
+                if constexpr (Type == Sync_wait_type::single)
                 {
-                    // pull the tuple out of the variant and wrap it into an
-                    // optional, make sure to remove the references
                     return hpx::optional<single_result_type>(
                         hpx::get<0>(hpx::get<result_type>(HPX_MOVE(value))));
                 }
-                else if (hpx::holds_alternative<error_type>(value))
+                else if constexpr (Type == Sync_wait_type::variant)
+                {
+                    return hpx::optional(
+                        hpx::get<result_type>(HPX_MOVE(value)));
+                }
+
+                if (hpx::holds_alternative<error_type>(value))
                 {
                     hpx::visit(
                         sync_wait_error_visitor{}, hpx::get<error_type>(value));
-                    HPX_UNREACHABLE;
                 }
 
-                // Something went very wrong if this assert fired. Essentially
-                // this means that none of set_value/set_error/set_stopped was
-                // called.
-                HPX_ASSERT(hpx::holds_alternative<stopped_type>(value));
-                return hpx::optional<single_result_type>();
+                // If the variant holds a hpx::monostate set_stopped was called
+                // we return an empty optional
+                return hpx::optional<result_type>();
             }
         };
 
         shared_state& state;
-        run_loop& loop;
+
+        void signal_set_called() noexcept
+        {
+            std::unique_lock<mutex_type> l(state.mtx);
+            state.set_called = true;
+            hpx::util::ignore_while_checking<decltype(l)> il(&l);
+            HPX_UNUSED(il);
+
+            state.cond_var.notify_one();
+        }
 
         template <typename Error>
         friend void tag_invoke(
             set_error_t, sync_wait_receiver&& r, Error&& error) noexcept
         {
-            using error_t = std::decay_t<Error>;
-            if constexpr (std::is_same_v<error_t, std::exception_ptr>)
-            {
-                r.state.value.template emplace<error_type>(
-                    HPX_FORWARD(Error, error));
-            }
-            else if constexpr (std::is_same_v<error_t, std::error_code>)
-            {
-                r.state.value.template emplace<error_type>(
-                    std::exception_ptr(std::system_error(error)));
-            }
-            else
-            {
-                r.state.value.template emplace<error_type>(
-                    std::exception_ptr(HPX_FORWARD(Error, error)));
-            }
-
-            r.loop.finish();
+            r.state.value.template emplace<error_type>(
+                HPX_FORWARD(Error, error));
+            r.signal_set_called();
         }
 
-        friend void tag_invoke(
-            set_stopped_t tag, sync_wait_receiver&& r) noexcept
+        friend void tag_invoke(set_stopped_t, sync_wait_receiver&& r) noexcept
         {
-            r.state.value.template emplace<stopped_type>(tag);
-            r.loop.finish();
+            r.signal_set_called();
         }
 
+        // possible add it back
         template <typename... Us>
         friend void tag_invoke(
             set_value_t, sync_wait_receiver&& r, Us&&... us) noexcept
         {
             r.state.value.template emplace<result_type>(
                 hpx::forward_as_tuple(HPX_FORWARD(Us, us)...));
-            r.loop.finish();
-        }
-
-        friend sync_wait_receiver_env tag_invoke(
-            hpx::execution::experimental::get_env_t,
-            sync_wait_receiver const& r) noexcept
-        {
-            return {r.loop.get_scheduler()};
+            r.signal_set_called();
         }
     };
 }    // namespace hpx::execution::experimental::detail
 
 namespace hpx::this_thread::experimental {
-
+    
     // this_thread::sync_wait is a sender consumer that submits the work
     // described by the provided sender for execution, similarly to
     // ensure_started, except that it blocks the current std::thread or thread
@@ -303,19 +296,19 @@ namespace hpx::this_thread::experimental {
     //          3. If execution::set_stopped(r) has been called, returns
     //             sync-wait-type<S, sync-wait-env>{}.
     //
+
     inline constexpr struct sync_wait_t final
       : hpx::functional::detail::tag_priority<sync_wait_t>
     {
     private:
         // clang-format off
-        template <typename Sender,
+        template <typename Sender, Sync_wait_type Type,
             HPX_CONCEPT_REQUIRES_(
-                hpx::execution::experimental::is_sender_v<Sender,
-                    hpx::execution::experimental::detail::sync_wait_receiver_env> &&
+                hpx::execution::experimental::is_sender_v<Sender> &&
                 hpx::execution::experimental::detail::
                     is_completion_scheduler_tag_invocable_v<
                         hpx::execution::experimental::set_value_t,
-                        Sender, sync_wait_t
+                        Sender, Type, sync_wait_t
                     >
             )>
         // clang-format on
@@ -331,71 +324,26 @@ namespace hpx::this_thread::experimental {
         }
 
         // clang-format off
-        template <typename Sender,
+        template <typename Sender, Sync_wait_type Type,
             HPX_CONCEPT_REQUIRES_(
-                hpx::execution::experimental::is_sender_v<Sender,
-                    hpx::execution::experimental::detail::sync_wait_receiver_env>
+                hpx::execution::experimental::is_sender_v<Sender>
             )>
         // clang-format on
-        friend auto tag_invoke(sync_wait_t,
-            hpx::execution::experimental::run_loop_scheduler const& sched,
-            Sender&& sender)
-        {
-            using receiver_type =
-                hpx::execution::experimental::detail::sync_wait_receiver<
-                    Sender>;
-            using state_type = typename receiver_type::shared_state;
-
-            hpx::execution::experimental::run_loop& loop = sched.get_run_loop();
-            state_type state{};
-            auto op_state = hpx::execution::experimental::connect(
-                HPX_FORWARD(Sender, sender), receiver_type{state, loop});
-            hpx::execution::experimental::start(op_state);
-
-            // Wait for the variant to be filled in.
-            loop.run();
-
-            return state.get_value();
-        }
-
-        // clang-format off
-        template <typename Sender,
-            HPX_CONCEPT_REQUIRES_(
-                hpx::execution::experimental::is_sender_v<Sender,
-                    hpx::execution::experimental::detail::sync_wait_receiver_env>
-            )>
-        // clang-format on
-        friend HPX_FORCEINLINE auto tag_fallback_invoke(
+        friend constexpr HPX_FORCEINLINE auto tag_fallback_invoke(
             sync_wait_t, Sender&& sender)
         {
             using receiver_type =
                 hpx::execution::experimental::detail::sync_wait_receiver<
-                    Sender>;
+                    Sender, Type>;
             using state_type = typename receiver_type::shared_state;
 
-            hpx::execution::experimental::run_loop loop{};
             state_type state{};
             auto op_state = hpx::execution::experimental::connect(
-                HPX_FORWARD(Sender, sender), receiver_type{state, loop});
+                HPX_FORWARD(Sender, sender), receiver_type{state});
             hpx::execution::experimental::start(op_state);
 
-            // Wait for the variant to be filled in.
-            loop.run();
-
+            state.wait();
             return state.get_value();
-        }
-
-        // clang-format off
-        template <typename Scheduler,
-            HPX_CONCEPT_REQUIRES_(
-                hpx::execution::experimental::is_scheduler_v<Scheduler>
-            )>
-        // clang-format on
-        friend constexpr HPX_FORCEINLINE auto tag_fallback_invoke(
-            sync_wait_t, Scheduler&& scheduler)
-        {
-            return hpx::execution::experimental::detail::inject_scheduler<
-                sync_wait_t, Scheduler>{HPX_FORWARD(Scheduler, scheduler)};
         }
 
         friend constexpr HPX_FORCEINLINE auto tag_fallback_invoke(sync_wait_t)
