@@ -60,8 +60,8 @@ namespace hpx::execution::experimental::detail {
     
     // integrate sync_wait and sync_wait_with_variant
     enum class Sync_wait_type { single=0, variant=1};
-    
-    template <typename Sender, Sync_wait_type Type >
+
+    template <typename Sender, Sync_wait_type Type>
     struct sync_wait_receiver
     {
         // value and error_types of the predecessor sender
@@ -73,7 +73,6 @@ namespace hpx::execution::experimental::detail {
         template <template <typename...> class Variant>
         using predecessor_error_types =
             error_types_of_t<Sender, empty_env, Variant>;
-        
 
         // forcing static_assert ensuring variant has exactly one tuple
         //
@@ -82,13 +81,13 @@ namespace hpx::execution::experimental::detail {
         // value_types for a sender. In particular, split() explicitly adds a
         // const& to all tuple members in a way that prevent simply passing
         // decayed_tuple to predecessor_value_types.
-         using single_result_type = make_decayed_pack_t<
-             single_variant_t<predecessor_value_types<hpx::tuple, meta::pack>>>;
-
+        using single_result_type = make_decayed_pack_t <
+            single_variant_t<predecessor_value_types<hpx::tuple, meta::pack>>;
         // The template should compute the result type of whatever returned from
         // sync_wait or sync_wait_with_variant by checking Sync_wait_type is single or variant
-
-        using result_type = std::conditional<Type == Sync_wait_type::single, hpx::variant<single_result_type>, predecessor_value_types<hpx::tuple, hpx::variant>>;
+        using result_type = std::conditional<Type == Sync_wait_type::single,
+            hpx::variant<single_result_type>,
+            predecessor_value_types<hpx::tuple, hpx::variant>>::type;
 
         // The type of errors to store in the variant. This in itself is a
         // variant.
@@ -122,15 +121,17 @@ namespace hpx::execution::experimental::detail {
 
             auto get_value()
             {
-                if constexpr(Type == Sync_wait_type::single){
+                if constexpr (Type == Sync_wait_type::single)
+                {
                     return hpx::optional<single_result_type>(
                         hpx::get<0>(hpx::get<result_type>(HPX_MOVE(value))));
-        
-                }else{
+                }
+                else if constexpr (Type == Sync_wait_type::variant)
+                {
                     return hpx::optional(
                         hpx::get<result_type>(HPX_MOVE(value)));
                 }
-                
+
                 if (hpx::holds_alternative<error_type>(value))
                 {
                     hpx::visit(
@@ -139,7 +140,7 @@ namespace hpx::execution::experimental::detail {
 
                 // If the variant holds a hpx::monostate set_stopped was called
                 // we return an empty optional
-                return hpx::optional<single_result_type>();
+                return hpx::optional<result_type>();
             }
         };
 
@@ -216,11 +217,10 @@ namespace hpx::this_thread::experimental {
             )>
         // clang-format on
         friend constexpr HPX_FORCEINLINE auto tag_fallback_invoke(
-            sync_wait_t, Sender&& sender)
+            sync_wait_t, Sender&& sender, Type&& tp)
         {
             using receiver_type =
-                hpx::execution::experimental::detail::sync_wait_receiver<
-                    Sender>;
+                hpx::execution::experimental::detail::<Sender, Type>;
             using state_type = typename receiver_type::shared_state;
 
             state_type state{};
