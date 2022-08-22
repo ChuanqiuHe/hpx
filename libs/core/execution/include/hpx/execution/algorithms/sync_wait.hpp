@@ -87,7 +87,7 @@ namespace hpx::execution::experimental::detail {
         // sync_wait or sync_wait_with_variant by checking Sync_wait_type is single or variant
         using result_type = std::conditional<Type == Sync_wait_type::single,
             hpx::variant<single_result_type>,
-            predecessor_value_types<hpx::tuple, hpx::variant>>::type;
+            predecessor_value_types<hpx::tuple, hpx::variant>>; // ::type
 
         // The type of errors to store in the variant. This in itself is a
         // variant.
